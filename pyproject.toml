@@ -1,7 +1,7 @@
 [project]
 name = "wisski_path_generator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Generate RELEVEN paths from a source spreadsheet"
 readme = "README.md"
 authors = [
     { name = "Tara L. Andrews", email = "tla@mit.edu" }
