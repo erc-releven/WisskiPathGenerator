@@ -7,7 +7,7 @@
 # ]
 # ///
 import re
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from warnings import warn
 from lxml import etree
 from openpyxl import load_workbook
@@ -66,7 +66,7 @@ class wisski_path:
         self.displaywidget = None
         self.formatterwidget = None
 
-    def make_data_path(self, pathspec, supergroup, cardinality, fieldtype, displaywidget, formatterwidget):
+    def make_data_path(self, pathspec, supergroup, cardinality, valuetype):
         dp = pathspec.pop()
         self.set_pathspec(pathspec, dp)
         if supergroup:
@@ -74,9 +74,17 @@ class wisski_path:
         self.is_group = 0
         self.cardinality = cardinality
         self.field = self.generate_wisski_id()
-        self.fieldtype = fieldtype
-        self.displaywidget = displaywidget
-        self.formatterwidget = formatterwidget
+        # Check the datatype and set the appropriate field
+        fieldargs = ('string', 'string_textfield', 'string')
+        if valuetype == 'rdfs:Resource':
+            fieldargs = ('uri', 'uri', 'uri_link')
+        elif valuetype == 'xsd:coordinates':
+            fieldargs = ('geofield', 'geofield_latlon', 'geofield_latlon')
+        elif valuetype != 'xsd:string':
+            warn(f'Unrecognised datatype {valuetype}; setting as string')
+        self.fieldtype = fieldargs[0]
+        self.displaywidget = fieldargs[1]
+        self.formatterwidget = fieldargs[2]
 
     def make_entityref_path(self, pathspec, supergroup, cardinality):
         self.set_pathspec(pathspec)
@@ -96,7 +104,7 @@ class wisski_path:
     def to_xml(self):
         path = etree.Element("path")
         # Add the first set of fields
-        for field in ['id', 'enabled', 'group_id', 'bundle', 'field', 'fieldtype', 'displaywidget', 'formatterwidget', 'cardinality']:
+        for field in ['id', 'weight', 'enabled', 'group_id', 'bundle', 'field', 'fieldtype', 'displaywidget', 'formatterwidget', 'cardinality']:
             e = etree.Element(field)
             if getattr(self, field) is not None:
                 e.text = str(getattr(self, field))
@@ -167,10 +175,13 @@ def make_simple_path(g, parent, lineinfo):
     # e.g. p_boulloterion_descriptive_name
     spid = make_id(" ".join([parent.name, lineinfo['label']]))
     dpath = parent.pathspec.copy()
-    dpath.extend([get_uri(g, lineinfo['predicate']), get_uri(g, lineinfo['object'])])
+    dpath.append(get_uri(g, lineinfo['predicate']))
     wp = wisski_path(spid, lineinfo['label'])
-    # TODO check whether the object is xsd:string or something else
-    wp.make_data_path(dpath, parent.id, 1, 'string', 'string_textfield', 'string')
+    cardinality = 1 if lineinfo['type'] == 'l' else '-1'
+    if lineinfo['entityref']:
+        wp.make_entityref_path(dpath, parent.id, cardinality)
+    else:
+        wp.make_data_path(dpath, parent.id, cardinality, lineinfo['object'])
     return wp
 
 
@@ -239,14 +250,12 @@ def make_object_path(g, parent, lineinfo, chainbottom):
         path = parent.pathspec + [chainbottom, get_uri(g, 'crm:E42_Identifier')]
         # We need to make the object a group with two data paths
         ppp = f'{parent.id[2:]}_identifier'
-        object_p = wisski_path(f'g_{ppp}_identifier', 'External identifier')
+        object_p = wisski_path(f'g_{ppp}', 'External identifier')
         object_p.make_group(path, parent.id, 1)
         object_content = wisski_path(object_p.id + '_plain', 'Plaintext identifier')
-        object_content.make_data_path(path + [get_uri(g, 'crm:P190_has_symbolic_content'), get_uri(g, 'xsd:string')],
-                                       object_p.id, 1, 'string', 'string_textfield', 'string')
+        object_content.make_data_path(path + [get_uri(g, 'crm:P190_has_symbolic_content')], object_p.id, 1, 'xsd:string')
         object_uri = wisski_path(object_p.id + '_is', 'URI in the database / repository')
-        object_uri.make_data_path(path + [get_uri(g, 'owl:sameAs'), get_uri(g, 'crm:E42_Identifier')],
-                                   object_p.id, 1, 'uri', 'uri', 'uri_link')
+        object_uri.make_data_path(path + [get_uri(g, 'owl:sameAs')], object_p.id, 1, 'rdfs:Resource')
         # Go ahead and return it now
         return object_p, object_content, object_uri
 
@@ -257,13 +266,19 @@ def make_object_path(g, parent, lineinfo, chainbottom):
     label = re.sub(r'^g_(.*)_assertion', r'p_\1_is', parent.id)
     object_p = wisski_path(label, lineinfo['label'])
 
-    # and either the entity reference field, or the datatype field
+    # Either it's an entity reference field, or a datatype field, or a group
+    # which we expect to have sub-fields
     if lineinfo['entityref']:
         object_p.make_entityref_path(path, parent, 1)
+    elif len(lineinfo['remainder']):
+        if len(lineinfo['remainder']) != 2:
+            warn(f"Something wonky about the line specification {lineinfo}") 
+        dtype_prop, dtype = lineinfo['remainder']
+        path.append(get_uri(g, dtype_prop))
+        object_p.make_data_path(path, parent, 1, dtype)
     else:
-        path += [get_uri(g, x) for x in lineinfo['remainder']]
-        # TODO check the actual datatype
-        object_p.make_data_path(path, parent, 1, 'string', 'string_textfield', 'string')
+        object_p.make_group(path, parent.id, 1)
+
     return object_p
 
 
@@ -283,6 +298,7 @@ def make_authority_paths(g, parent, authclass):
             label += '_group'
             name += ' (group)'
         elif 'F11' in authclass:
+            label = 'p_' + parent.id[2:] + '_by'
             name = 'Database / repository'
         authority = wisski_path(label, name)
         apath = parent.pathspec.copy()
@@ -461,6 +477,15 @@ def find_parent(stack, lineinfo):
         return _top(stack, pop=True)[1] if len(stack) else None
     
 
+def weight_paths(pathlist):
+    """Assign weights to the paths in the order they were written."""
+    weights = defaultdict(int)
+    for path in pathlist:
+        pp = path.group_id
+        path.set_weight(weights[pp])
+        weights[pp] += 1  
+    
+
 if __name__ == '__main__':
     FN = argv[1] if len(argv) > 1 else 'data/wisski_canonical_paths.xlsx'
     ONT = argv[2] if len(argv) > 2 else '../ontologies/releven-star.ttl'
@@ -478,7 +503,7 @@ if __name__ == '__main__':
             continue
         lineinfo = parse_line(row)
         parent = find_parent(stack, lineinfo)
-        if lineinfo['type'] == 'l':
+        if lineinfo['type'] in 'lm':
             # It is a simple datatype path. Make it and carry on;
             # it won't be a parent to anything.
             wisski_paths.append(make_simple_path(g, parent, lineinfo))
@@ -494,6 +519,8 @@ if __name__ == '__main__':
             wisski_paths.extend(newpaths)
             # ...and add the object as the parent at this level
             stack[lineinfo['level']] = newpaths[1]
+    # Add the path weights all in one go
+    weight_paths(wisski_paths)
 
     # Now serialise all those paths
     pathbuilder = etree.Element('pathbuilderinterface')
