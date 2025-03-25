@@ -12,14 +12,47 @@ from warnings import warn
 from lxml import etree
 from openpyxl import load_workbook
 from random import choice
-from rdflib import Graph
-from sys import argv
+from rdflib import Graph, URIRef
+from sys import argv, stderr
 from string import hexdigits, punctuation
 from uuid import uuid4
 
 
 class PathbuilderError(Exception):
     pass
+
+
+class Pathbuilder:
+    """Defines a pathbuilder, which holds an ordered list of WissKI paths."""
+
+    pathlist = OrderedDict()
+
+    def __init__(self):
+        pass
+
+    def add_path(self, pathobj):
+        if pathobj.id in self.pathlist:
+            raise PathbuilderError(f"Path with ID {pathobj.id} already exists in the pathbuilder!")
+        self.pathlist[pathobj.id] = pathobj
+
+    def delete_path(self, pathobj):
+        del self.pathlist[pathobj.id]
+
+    def weight_paths(self):
+        """Assign weights to the paths in the order they were written."""
+        weights = defaultdict(int)
+        for path in self.pathlist.values():
+            pp = path.group_id
+            path.set_weight(weights[pp])
+            weights[pp] += 1  
+    
+    def serialize(self):
+        """Return a string which is the XML serialization of the pathbuilder."""
+        self.weight_paths()
+        pbtree = etree.Element('pathbuilderinterface')
+        for path in self.pathlist.values():
+            pbtree.append(path.to_xml())
+        return etree.tostring(pbtree, pretty_print=True).decode()
 
 
 class WisskiPath:
@@ -191,10 +224,12 @@ def get_uri(graph, ustr):
     return str(nslist[prefix]) + rest
 
 
-def get_star_assertion(predicate):
-    prefix, name = predicate.split(':')
+def get_star_entities(predicate):
+    reversed = predicate.startswith('^')
+    prefix, name = predicate.lstrip('^').split(':')
     pid = name.split('_')[0]
-    return f'star:E13_{prefix}_{pid}'
+    s, o = ('P141', 'P140') if reversed else ('P140', 'P141') 
+    return f'star:{s}_{prefix}_{pid}', f'star:E13_{prefix}_{pid}', f'star:{o}_{prefix}_{pid}'
 
 
 def make_id(descname, isgroup=False):
@@ -220,12 +255,7 @@ def make_simple_path(g, parent, lineinfo):
 
 def make_assertion_pathchain(g, predicate):
     """Takes a predicate/object pair and returns the correct STARified path chain"""
-    chaintop = 'crm:P140_assigned_attribute_to'
-    chainbottom = 'crm:P141_assigned'
-    assertionclass = get_star_assertion(predicate.lstrip('^'))
-    if lineinfo['predicate'].startswith('^'):
-        # The object, not the subject, is on top
-        chainbottom, chaintop = chaintop, chainbottom
+    chaintop, assertionclass, chainbottom = get_star_entities(predicate)
     # FQ the lot and reverse the top of the chain
     return '^' + get_uri(g, chaintop), get_uri(g, assertionclass), get_uri(g, chainbottom)
 
@@ -233,22 +263,26 @@ def make_assertion_pathchain(g, predicate):
 def make_assertion_path(g, parent, lineinfo):
     """Takes a parent group that is an object and returns the assertion group on this
     parent, based on the lineinfo."""
+    # Accrete the label
+    label = lineinfo['label'] + ' assertion' if lineinfo['label'] else ''
+    # This makes something like g_time_frame_assertion
+    id = make_id(label, isgroup=True)
+    # But we actually want g_publication_creation_time_frame_assertion. Here we rely on
+    # their both starting with g_
+    id = parent.id + id[2:]
+    path = []
     # First make the assignment group for the assertion.     
     # We need to get the right STAR assertion and predicates for this
-    chaintop = 'crm:P140_assigned_attribute_to'
-    chainbottom = 'crm:P141_assigned'
-    label = lineinfo['label'] + ' assertion' if lineinfo['label'] else ''
-    id = make_id(f"{parent.name} {label}", isgroup=True)
-    path = []
     if lineinfo['type'] == 't':
         # The assertion is an E17 with its specialised predicates
-        assertionclass = 'crm:E17_Type_Assignment'
-        chaintop = 'crm:P41_classified'
-        chainbottom = 'crm:P42_assigned'
+        assertionclass = get_uri(g, 'crm:E17_Type_Assignment')
+        chaintop = '^' + get_uri(g, 'crm:P41_classified')
+        chainbottom = get_uri(g, 'crm:P42_assigned')
     elif lineinfo['type'] == 'identifier':
         # The assertion is an E15 with its specialised object predicate
-        assertionclass = 'crm:E15_Identifier_Assignment'
-        chainbottom = 'crm:P37_assigned'
+        assertionclass = get_uri(g, 'crm:E15_Identifier_Assignment')
+        chaintop = '^' + get_uri(g, 'crm:P140_assigned_attribute_to')
+        chainbottom = get_uri(g, 'crm:P37_assigned')
         # The labels are standard strings
         label = 'Identity in other services'
         id = parent.id + '_id_assignment'
@@ -288,9 +322,9 @@ def make_object_path(g, parent, lineinfo, chainbottom):
         ppp = f'{parent.id[2:]}_identifier'
         object_p = WisskiPath(f'g_{ppp}', 'External identifier')
         object_p.make_group(path, parent, 1)
-        object_content = WisskiPath(object_p.id + '_plain', 'Plaintext identifier')
+        object_content = WisskiPath(f'p_{ppp}_plain', 'Plaintext identifier')
         object_content.make_data_path([get_uri(g, 'crm:P190_has_symbolic_content')], object_p, 1, 'xsd:string')
-        object_uri = WisskiPath(object_p.id + '_is', 'URI in the database / repository')
+        object_uri = WisskiPath(f'p_{ppp}_is', 'URI in the database / repository')
         object_uri.make_data_path([get_uri(g, 'owl:sameAs')], object_p, 1, 'rdfs:Resource')
         # Go ahead and return it now
         return object_p, object_content, object_uri
@@ -396,6 +430,18 @@ def make_assignment_paths(g, parent, lineinfo):
     assignment.extend(authorities)
     assignment.extend([src_p, prov_p])
     return assignment
+
+
+def make_event_path(g, parent, lineinfo):
+    """Takes a parent group that is an object. Returns a group that has a 
+    path chain through a bare assertion."""
+    # Pick out the assertion and the object
+    chaintop, assertion, chainbottom = make_assertion_pathchain(g, lineinfo['predicate'])
+    labelseed = f"{parent.name} {lineinfo['label']}"
+    event = WisskiPath(make_id(labelseed, isgroup=True), lineinfo['label'])
+    epath = [chaintop, assertion, chainbottom, get_uri(g, lineinfo['object'])]
+    event.make_group(epath, parent, 1 if lineinfo['type'] == 'b' else 'Unlimited')
+    return event
 
 
 def parse_line(line):
@@ -512,15 +558,6 @@ def find_parent(stack, lineinfo):
         return _top(stack, pop=True)[1] if len(stack) else None
     
 
-def weight_paths(pathlist):
-    """Assign weights to the paths in the order they were written."""
-    weights = defaultdict(int)
-    for path in pathlist:
-        pp = path.group_id
-        path.set_weight(weights[pp])
-        weights[pp] += 1  
-    
-
 if __name__ == '__main__':
     FN = argv[1] if len(argv) > 1 else 'data/wisski_canonical_paths.xlsx'
     ONT = argv[2] if len(argv) > 2 else '../ontologies/releven-star.ttl'
@@ -528,7 +565,7 @@ if __name__ == '__main__':
     g = Graph()
     g.parse(ONT)
 
-    wisski_paths = []
+    wisski_paths = Pathbuilder()
     # Work through the input line by line, creating the necessary paths
     stack = OrderedDict()
     first_skipped = False
@@ -537,28 +574,41 @@ if __name__ == '__main__':
             first_skipped = True
             continue
         lineinfo = parse_line(row)
+        # Sanity-check that all predicates and objects exist in the ontology
+        check_entities = [lineinfo['predicate'], lineinfo['object']]
+        check_entities.extend(lineinfo['remainder'])
+        check_entities.extend(lineinfo.get('prefix', []))
+        for e in check_entities:
+            if e is None:
+                continue
+            n = e.lstrip('^')
+            if not n.startswith('xsd'):
+                # Make sure it exists in the graph
+                defns = [x for x in g.objects(URIRef(get_uri(g, n)))]
+                if not len(defns):
+                    print(f"Entity {n} evidently not defined", file=stderr)
+                    exit()
         parent = find_parent(stack, lineinfo)
         if lineinfo['type'] in 'lm':
             # It is a simple datatype path. Make it and carry on;
             # it won't be a parent to anything.
-            wisski_paths.append(make_simple_path(g, parent, lineinfo))
+            wisski_paths.add_path(make_simple_path(g, parent, lineinfo))
         elif lineinfo['type'] == 'top':
             # It is a top-level group. Make it and put it on the stack
             entity = WisskiPath(make_id(lineinfo['label'], isgroup=True), lineinfo['label'])
             entity.make_group([get_uri(g, lineinfo['object'])], None, 'Unlimited')
-            wisski_paths.append(entity)
+            wisski_paths.add_path(entity)
             stack[0] = entity
+        elif lineinfo['type'] in 'bg':
+            # It is an event group. Make it and put it on the stack
+            entity = make_event_path(g, parent, lineinfo)
+            wisski_paths.add_path(entity)
+            stack[lineinfo['level']] = entity
         else:
-            # It is some sort of assertion path. Make the lot
+            # It is an assertion path. TODO is it ever a parent?
             newpaths = make_assignment_paths(g, parent, lineinfo)
-            wisski_paths.extend(newpaths)
+            [wisski_paths.add_path(x) for x in newpaths]
             # ...and add the object as the parent at this level
             stack[lineinfo['level']] = newpaths[1]
-    # Add the path weights all in one go
-    weight_paths(wisski_paths)
-
     # Now serialise all those paths
-    pathbuilder = etree.Element('pathbuilderinterface')
-    for path in wisski_paths:
-        pathbuilder.append(path.to_xml())
-    print(etree.tostring(pathbuilder, pretty_print=True).decode())
+    print(wisski_paths.serialize())
