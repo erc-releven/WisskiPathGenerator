@@ -18,12 +18,17 @@ from string import hexdigits, punctuation
 from uuid import uuid4
 
 
-class wisski_path:
+class PathbuilderError(Exception):
+    pass
+
+
+class WisskiPath:
     """Defines the components of a path that goes into a pathbuilder."""
 
     enabled = 0
     group_id = 0
     disamb = 0
+    is_group = False
     datatype_property = 'empty'
     field_type_informative = None
     short_name = None
@@ -55,24 +60,50 @@ class wisski_path:
     def set_weight(self, weight):
         self.weight = weight
 
-    def make_group(self, pathspec, supergroup, cardinality):
-        self.set_pathspec(pathspec)
-        if supergroup:
-            self.group_id = supergroup
-        self.is_group = 1
+    def set_cardinality(self, cardinality):
+        if not cardinality:
+            cardinality = -1
+        else:
+            # See if it is a positive integer
+            try:
+                cardinality = int(cardinality)
+                if cardinality < 1:
+                    raise PathbuilderError(f"Cardinality should be 'unlimited' or a positive integer")
+            except ValueError:
+                if cardinality == 'Unlimited' or cardinality == 'unlimited':
+                    cardinality = -1
+                else:
+                    raise PathbuilderError(f"Invalid cardinality setting {cardinality}; should be 'unlimited' or a positive integer")
         self.cardinality = cardinality
+
+
+    def make_group(self, pathspec, supergroup, cardinality):
+        if supergroup:
+            if not supergroup.is_group:
+                raise PathbuilderError("The supergroup needs to be a WissKI group")
+            self.group_id = supergroup.id
+            pathspec = supergroup.pathspec + pathspec
+        self.set_pathspec(pathspec)
+        self.is_group = 1
+        self.set_cardinality(cardinality)
         self.field = self.bundle
         self.fieldtype = None
         self.displaywidget = None
         self.formatterwidget = None
 
     def make_data_path(self, pathspec, supergroup, cardinality, valuetype):
+        # Set the supergroup and prepend its path
+        if supergroup:
+            if not supergroup.is_group:
+                raise PathbuilderError("The supergroup needs to be a WissKI group")
+            self.group_id = supergroup.id
+            pathspec = supergroup.pathspec + pathspec
+        # Pop off the datatype property and set the path
         dp = pathspec.pop()
         self.set_pathspec(pathspec, dp)
-        if supergroup:
-            self.group_id = supergroup
+
         self.is_group = 0
-        self.cardinality = cardinality
+        self.set_cardinality(cardinality)
         self.field = self.generate_wisski_id()
         # Check the datatype and set the appropriate field
         fieldargs = ('string', 'string_textfield', 'string')
@@ -87,11 +118,14 @@ class wisski_path:
         self.formatterwidget = fieldargs[2]
 
     def make_entityref_path(self, pathspec, supergroup, cardinality):
-        self.set_pathspec(pathspec)
         if supergroup:
-            self.group_id = supergroup
+            if not supergroup.is_group:
+                raise PathbuilderError("The supergroup needs to be a WissKI group")
+            self.group_id = supergroup.id
+            pathspec = supergroup.pathspec + pathspec
+        self.set_pathspec(pathspec)
         self.is_group = 0
-        self.cardinality = cardinality
+        self.set_cardinality(cardinality)
         self.field = self.generate_wisski_id()
         self.fieldtype = 'entity_reference'
         self.displaywidget = 'entity_reference_autocomplete'
@@ -130,7 +164,7 @@ class wisski_path:
         # Fish out the ID and name to initialise the element
         id = etree_element['id'].text
         name = etree_element['name'].text
-        path = wisski_path(id, name)
+        path = WisskiPath(id, name)
         for el in etree_element:
             if el.name == 'path_array':
                 pathspec = []
@@ -174,14 +208,13 @@ def make_simple_path(g, parent, lineinfo):
     based on the lineinfo, e.g. for rdf:label. Returns the single path"""
     # e.g. p_boulloterion_descriptive_name
     spid = make_id(" ".join([parent.name, lineinfo['label']]))
-    dpath = parent.pathspec.copy()
-    dpath.append(get_uri(g, lineinfo['predicate']))
-    wp = wisski_path(spid, lineinfo['label'])
-    cardinality = 1 if lineinfo['type'] == 'l' else '-1'
+    dpath = [get_uri(g, lineinfo['predicate'])]
+    wp = WisskiPath(spid, lineinfo['label'])
+    cardinality = 1 if lineinfo['type'] == 'l' else 0
     if lineinfo['entityref']:
-        wp.make_entityref_path(dpath, parent.id, cardinality)
+        wp.make_entityref_path(dpath, parent, cardinality)
     else:
-        wp.make_data_path(dpath, parent.id, cardinality, lineinfo['object'])
+        wp.make_data_path(dpath, parent, cardinality, lineinfo['object'])
     return wp
 
 
@@ -206,7 +239,7 @@ def make_assertion_path(g, parent, lineinfo):
     chainbottom = 'crm:P141_assigned'
     label = lineinfo['label'] + ' assertion' if lineinfo['label'] else ''
     id = make_id(f"{parent.name} {label}", isgroup=True)
-    path = parent.pathspec.copy()
+    path = []
     if lineinfo['type'] == 't':
         # The assertion is an E17 with its specialised predicates
         assertionclass = 'crm:E17_Type_Assignment'
@@ -231,13 +264,16 @@ def make_assertion_path(g, parent, lineinfo):
                 object = lineinfo['prefix'].pop(0)
                 chain.extend(make_assertion_pathchain(g, predicate))
                 chain.append(get_uri(g, object))
-            path.extend(chain)
+            path = chain
         # Now STARify whatever the predicate was  
         chaintop, assertionclass, chainbottom = make_assertion_pathchain(g, lineinfo['predicate'])
 
     path.extend([chaintop, assertionclass])
-    assertion = wisski_path(id, label)
-    assertion.make_group(path, parent.id, -1)
+    # A bare assertion has a cardinality of 1, as there should only be one of these things
+    # per entity
+    cardinality = 1 if lineinfo['type'] == 'b' else 'Unlimited'
+    assertion = WisskiPath(id, label)
+    assertion.make_group(path, parent, cardinality)
     return assertion, chainbottom
 
 
@@ -247,24 +283,23 @@ def make_object_path(g, parent, lineinfo, chainbottom):
      # The identifier line is special-cased and regular; we are making a whole object group
     # and two extra paths. Intervene here where necessary
     if lineinfo['type'] == 'identifier':
-        path = parent.pathspec + [chainbottom, get_uri(g, 'crm:E42_Identifier')]
+        path = [chainbottom, get_uri(g, 'crm:E42_Identifier')]
         # We need to make the object a group with two data paths
         ppp = f'{parent.id[2:]}_identifier'
-        object_p = wisski_path(f'g_{ppp}', 'External identifier')
-        object_p.make_group(path, parent.id, 1)
-        object_content = wisski_path(object_p.id + '_plain', 'Plaintext identifier')
-        object_content.make_data_path(path + [get_uri(g, 'crm:P190_has_symbolic_content')], object_p.id, 1, 'xsd:string')
-        object_uri = wisski_path(object_p.id + '_is', 'URI in the database / repository')
-        object_uri.make_data_path(path + [get_uri(g, 'owl:sameAs')], object_p.id, 1, 'rdfs:Resource')
+        object_p = WisskiPath(f'g_{ppp}', 'External identifier')
+        object_p.make_group(path, parent, 1)
+        object_content = WisskiPath(object_p.id + '_plain', 'Plaintext identifier')
+        object_content.make_data_path([get_uri(g, 'crm:P190_has_symbolic_content')], object_p, 1, 'xsd:string')
+        object_uri = WisskiPath(object_p.id + '_is', 'URI in the database / repository')
+        object_uri.make_data_path([get_uri(g, 'owl:sameAs')], object_p, 1, 'rdfs:Resource')
         # Go ahead and return it now
         return object_p, object_content, object_uri
 
     # In all other cases, just add the single object class    
-    path = parent.pathspec.copy()
     # Now add the main object to the path
-    path.append(chainbottom)
+    path = [chainbottom, get_uri(g, lineinfo['object'])]
     label = re.sub(r'^g_(.*)_assertion', r'p_\1_is', parent.id)
-    object_p = wisski_path(label, lineinfo['label'])
+    object_p = WisskiPath(label, lineinfo['label'])
 
     # Either it's an entity reference field, or a datatype field, or a group
     # which we expect to have sub-fields
@@ -276,8 +311,11 @@ def make_object_path(g, parent, lineinfo, chainbottom):
         dtype_prop, dtype = lineinfo['remainder']
         path.append(get_uri(g, dtype_prop))
         object_p.make_data_path(path, parent, 1, dtype)
+    elif lineinfo['type'] in 'bg':
+        # It is a group that will have sub-assertions
+        object_p.make_group(path, parent, 1)
     else:
-        object_p.make_group(path, parent.id, 1)
+        warn(f"Unable to determine object path type for {lineinfo}")
 
     return object_p
 
@@ -300,20 +338,17 @@ def make_authority_paths(g, parent, authclass):
         elif 'F11' in authclass:
             label = 'p_' + parent.id[2:] + '_by'
             name = 'Database / repository'
-        authority = wisski_path(label, name)
-        apath = parent.pathspec.copy()
-        apath.extend([get_uri(g, 'crm:P14_carried_out_by'), get_uri(g, authclass)])
-        authority.make_entityref_path(apath, parent.id, 1)
+        authority = WisskiPath(label, name)
+        apath = [get_uri(g, 'crm:P14_carried_out_by'), get_uri(g, authclass)]
+        authority.make_entityref_path(apath, parent, 1)
         return [authority]
     
 
 def _make_starleg(g, parent, suffix, label, predicate, object):
     """Internal method for source and provenance legs"""
     wpid = re.sub(r'^g_(.*)_assertion', r'p_\1', parent.id) + suffix
-    wp = wisski_path(wpid, label)
-    wpath = parent.pathspec.copy()
-    wpath.extend([predicate, object])
-    wp.make_entityref_path(wpath, parent, 1)
+    wp = WisskiPath(wpid, label)
+    wp.make_entityref_path([predicate, object], parent, 1)
     return wp
 
 
@@ -337,8 +372,8 @@ def make_assignment_paths(g, parent, lineinfo):
     assertion, chainbottom = make_assertion_path(g, parent, lineinfo)
     # Then the path for the object
     object_p = make_object_path(g, assertion, lineinfo, chainbottom)
-    # If the assertion type is bare, then we are done
-    if lineinfo['type'] == 'b':
+    # If this is a grouping for further assertions, we are done after the object
+    if lineinfo['type'] in 'bg':
         return assertion, object_p 
 
     # Then the path for the authority
@@ -509,8 +544,8 @@ if __name__ == '__main__':
             wisski_paths.append(make_simple_path(g, parent, lineinfo))
         elif lineinfo['type'] == 'top':
             # It is a top-level group. Make it and put it on the stack
-            entity = wisski_path(make_id(lineinfo['label'], isgroup=True), lineinfo['label'])
-            entity.make_group([get_uri(g, lineinfo['object'])], None, -1)
+            entity = WisskiPath(make_id(lineinfo['label'], isgroup=True), lineinfo['label'])
+            entity.make_group([get_uri(g, lineinfo['object'])], None, 'Unlimited')
             wisski_paths.append(entity)
             stack[0] = entity
         else:
