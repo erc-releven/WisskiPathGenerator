@@ -114,10 +114,16 @@ class WisskiPath:
         self.enabled = 0
 
     def generate_field_id(self):
-        hex_chars = hexdigits.lower()[:16]  # Get hex characters (0-9, a-f)
-        wid = [choice(hex_chars) for _ in range(32)]
-        wid[0] = 'b' if self.is_group else 'f'
-        return ''.join(wid)
+        if self.enabled or self.is_group:
+            # Generate a random 32-char hex string, substituting the first letter
+            # with either 'b' or 'f' to deal with Drupal's field name restrictions
+            hex_chars = hexdigits.lower()[:16]  # Get hex characters (0-9, a-f)
+            wid = [choice(hex_chars) for _ in range(32)]
+            wid[0] = 'b' if self.is_group else 'f'
+            return ''.join(wid)
+        else:
+            # Return an empty-field indicator instead of doing this for real
+            return 'ea6cd7a9428f121a9a042fe66de406eb'
 
     def set_pathspec(self, sequence, datatype_property='empty'):
         """Given a list containing an entity / property / entity chain and an optional ending 
@@ -203,6 +209,9 @@ class WisskiPath:
             self._set_supergroup(supergroup)
             pathspec = supergroup.pathspec + pathspec
             self.bundle = supergroup.bundle
+        else:
+            raise PathbuilderError(f"Trying to make data path on {self.id} without any group?!")
+        self.bundle = supergroup.bundle if self.enabled else None
         # Pop off the datatype property and set the path
         dp = pathspec.pop()
         self.set_pathspec(pathspec, dp)
@@ -227,6 +236,9 @@ class WisskiPath:
             self._set_supergroup(supergroup)
             pathspec = supergroup.pathspec + pathspec
             self.bundle = supergroup.bundle
+        else:
+            raise PathbuilderError(f"Trying to make entity reference path on {self.id} without any group?!")
+        self.bundle = supergroup.bundle if self.enabled else None
         self.set_pathspec(pathspec)
         self.is_group = 0
         self.set_cardinality(cardinality)
@@ -471,7 +483,7 @@ class STARPathMaker:
     def make_source_leg(self, parent):
         """Takes a parent group that is an assertion and returns its source"""
         # The source passage is always an inline form
-        return self._make_starleg(parent, '_src', 'Found in', '^crm:P67_refers_to', 'spec:Passage', 'inline')
+        return self._make_starleg(parent, '_src', 'Found in', '^crm:P67_refers_to', 'crm:E33_Linguistic_Object', 'inline')
 
 
     def make_provenance_leg(self, parent):
@@ -670,7 +682,9 @@ if __name__ == '__main__':
             first_skipped = True
             continue
         lineinfo = parse_line(row)
-
+        if lineinfo is None:
+            # skip blank lines
+            continue
         parent = find_parent(stack, lineinfo)
         if lineinfo['type'] in 'lm':
             # It is a simple datatype path. Make it and carry on;
