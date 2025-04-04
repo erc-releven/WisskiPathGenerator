@@ -154,7 +154,7 @@ class WisskiPath:
                 raise PathbuilderError(f"Path specification should have an odd number of elements")
             # Check the datatype property too if we were asked to
             if check_datatype and (URIRef(datatype_property), RDF.type, OWL.DatatypeProperty) not in g:
-                raise PathbuilderError(f"Data property {dpexpn} not found in pathbuilder ontology")
+                raise PathbuilderError(f"Data property {datatype_property} not found in pathbuilder ontology")
                 
 
         # Either the sanity check passed, or this path was created outside of a pathbuilder.
@@ -305,9 +305,10 @@ class WisskiPath:
 
 
 class STARPathMaker:
-    def __init__(self, pathbuilder, expand_actors=False):
+    def __init__(self, pathbuilder, expand_actors=False, no_external=False):
         self.pathbuilder = pathbuilder
         self.expand_actors = expand_actors
+        self.no_external = no_external
 
     @staticmethod
     def get_star_entities(predicate):
@@ -408,6 +409,9 @@ class STARPathMaker:
             object_p.make_group(path, parent, 1)
             object_content = self.pathbuilder.add_path(f'p_{ppp}_plain', 'Plaintext identifier')
             object_content.make_data_path(['crm:P190_has_symbolic_content'], object_p, 1, 'xsd:string')
+            if self.no_external:
+                # We can't have the link to the external URI in WissKI, so just return what we have
+                return [object_p, object_content]
             object_uri = self.pathbuilder.add_path(f'p_{ppp}_is', 'URI in the database / repository')
             object_uri.make_data_path(['owl:sameAs'], object_p, 1, 'rdfs:Resource')
             # Go ahead and return it all now
@@ -664,6 +668,8 @@ if __name__ == '__main__':
                         help='A file specifying the paths to build, in XLSX format')
     parser.add_argument('-o', '--ontology', 
                         help='A file specifying the ontology the pathbuilder should use, in any format that rdflib can parse')
+    parser.add_argument('-n', '--no-external', action='store_true',
+                        help='Specify whether to exclude paths that point to external URIs')
     parser.add_argument('-x', '--expand-subclasses', action='store_true', 
                         help='Specify whether classes such as crm:E39_Actor should be expressed in multiple paths')
     args = parser.parse_args()
@@ -671,7 +677,7 @@ if __name__ == '__main__':
     g = Graph()
     g.parse(args.ontology)
 
-    maker = STARPathMaker(Pathbuilder(g, enable=True), expand_actors=args.expand_subclasses)
+    maker = STARPathMaker(Pathbuilder(g, enable=True), expand_actors=args.expand_subclasses, no_external=args.no_external)
 
     # Work through the input line by line, creating the necessary paths
     stack = OrderedDict()
