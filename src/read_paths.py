@@ -81,7 +81,7 @@ class STARPathMaker:
             assertionclass = 'crm:E17_Type_Assignment'
             chaintop = '^crm:P41_classified'
             chainbottom = 'crm:P42_assigned'
-        elif lineinfo['type'] == 'identifier':
+        elif lineinfo['type'] == 'i':
             # The assertion is an E15 with its specialised object predicate
             assertionclass = 'crm:E15_Identifier_Assignment'
             chaintop = '^crm:P140_assigned_attribute_to'
@@ -118,7 +118,7 @@ class STARPathMaker:
         attach something to the assertion, create the object path based on the lineinfo."""
         # The identifier line is special-cased and regular; we are making a whole object group
         # and two extra paths. Intervene here where necessary
-        if lineinfo['type'] == 'identifier':
+        if lineinfo['type'] == 'i':
             path = [chainbottom, 'crm:E42_Identifier']
             # We need to make the object a group with two data paths
             ppp = f'{parent.id[2:]}_identifier'
@@ -231,7 +231,7 @@ class STARPathMaker:
             return assignment
 
         # Then the path for the authority
-        if lineinfo['type'] == 'identifier':
+        if lineinfo['type'] == 'i':
             authorities = self.make_authority_legs(assertion, 'lrmoo:F11_Corporate_Body')
             # Add the authority and then we are done
             assignment.extend(authorities)
@@ -267,7 +267,7 @@ class STARPathMaker:
 
 ### Here is the line parsing logic / main routines ###
 
-def parse_line(line):
+def parse_line(line, max_column_index):
     # Return a hash with the line's level, type, label, main predicate, 
     # main object, and remaining path parts
     result = {
@@ -279,10 +279,18 @@ def parse_line(line):
         'entityref': False,
         'remainder': []
     }
-    # Find the first component and see how deep it is
-    idx = -1
+    # If the first two cells are filled out, we have the info we need.
+    if line[0]:
+        result.update({'type': 'top', 'label': line[0], 'object': line[1]})
+        return result
+    
+    # If not, this is a child line and we have to pull out the information.
+    # Now hunt down the rest of the information, including the hierarchy level of this path.
+    # The line type is always in column C
+    idx = 2
+    result['type'] = line[idx]
     first = None
-    while not first:
+    while not first and idx < max_column_index:
         idx += 1
         try:
             first = line[idx]
@@ -292,27 +300,22 @@ def parse_line(line):
         # This was an empty line
         return None
     result['level'] = idx
-    if first == 'identifier':
-        # This is an identifier line; no more values are filled in
-        result['type'] = first
-        return result
-    if idx == 0:
-        # This is a top-level group line
-        result.update({'type': 'top', 'label': first, 'object': line[1]})
+    if result['type'] == 'i':
+        # This is an identifier line; no more values are filled in.
         return result
     
+    
     # Otherwise, this is a typed label
-    result['type'] = first[0]
-    result['label'] = first[2:]
+    result['label'] = first
     if result['type'] == 'c':
         # If it is a compound path, we need to do more below. Save the whole chain for now
-        remainder = [x for x in line[idx+1:] if x is not None]
+        remainder = [x for x in line[idx+1:max_column_index] if x is not None]
     else:
         # If it isn't a compound path, the predicate and object are at positions 1 and 2
         result['predicate'] = line[idx+1]
         result['object'] = line[idx+2]
         # and the rest is either 'reference' or a datatype pair.
-        remainder = [x for x in line[idx+3:] if x is not None]
+        remainder = [x for x in line[idx+3:max_column_index] if x is not None]
 
     if len(remainder):
         # Is it an entity reference? Mark it as such if so
@@ -388,6 +391,8 @@ if __name__ == '__main__':
                         help='A file specifying the paths to build, in XLSX format')
     parser.add_argument('-o', '--ontology', 
                         help='A file specifying the ontology the pathbuilder should use, in any format that rdflib can parse')
+    parser.add_argument('-d', '--depth', default=15,
+                        help='Specify a maximum depth of paths, by index number of the rightmost spreadsheet column.')
     parser.add_argument('-n', '--no-external', action='store_true',
                         help='Specify whether to exclude paths that point to external URIs')
     parser.add_argument('-x', '--expand-subclasses', action='store_true', 
@@ -402,12 +407,13 @@ if __name__ == '__main__':
     # Work through the input line by line, creating the necessary paths
     stack = OrderedDict()
     first_skipped = False
+    max_depth = int(args.depth)
     for row in pathspec.values:
         if not first_skipped:
             # Assume there is a header row and skip it
             first_skipped = True
             continue
-        lineinfo = parse_line(row)
+        lineinfo = parse_line(row, max_depth)
         if lineinfo is None:
             # skip blank lines
             continue
