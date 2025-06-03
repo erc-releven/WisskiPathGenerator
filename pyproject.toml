@@ -1,5 +1,5 @@
 [project]
-name = "wisski_path_generator"
+name = "wisski_pathbuilder"
 version = "0.1.0"
 description = "Generate RELEVEN paths from a source spreadsheet"
 readme = "README.md"
@@ -16,6 +16,3 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/wisski_path_generator"]

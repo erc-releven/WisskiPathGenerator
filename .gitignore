@@ -2,3 +2,6 @@
 **/.venv
 **/.DS_Store
 **/catalog-v001.xml
+**/__pycache__
+**/py.typed
+data
