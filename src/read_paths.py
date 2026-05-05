@@ -169,6 +169,41 @@ class STARPathMaker:
 
         return created_paths
 
+    def make_span_legs(self, parent, lineinfo, chainbottom):
+        """Given a parent that is an assertion and the object predicate we need to
+        attach something to the assertion, create the time-span object group and its
+        three datatype paths."""
+        # If the object isn't something with a span (currently only E52), return an empty list
+        if lineinfo['object'] != 'crm:E52_Time-Span':
+            warn(f"Line {lineinfo} is marked as a span assertion but doesn't have crm:E52_Time-Span as its object")
+            return []
+        
+
+        # The timespan object is an E52 containing properties, thus a group
+        path = [chainbottom, lineinfo['object']]
+        label = re.sub(r'^g_(.*)_assertion', r'g_\1_is', parent.id)
+        span_p = self.pathbuilder.add_path(label, lineinfo['label'])
+        span_p.make_group(path, parent, 1)
+        created_paths = [span_p]
+
+        # Datatype properties that go with E52 are:
+        span_props = {'crm:P82a_begin_of_the_begin': 'Start date', 
+                      'crm:P82b_end_of_the_end': 'End date', 
+                      'rdfs:label': 'Date specification'}
+        
+        # For each of the datatype properties, make a datatype path off the E52 group
+        for prop, name in span_props.items():
+            dtype = 'spec:JulianDay'
+            prop_label = label.replace('g_','p_').replace('_is', '_' + name.split()[0].lower())
+            if 'P82' not in prop:
+                dtype = 'xsd:string'
+                prop_label = label.replace('g_','p_').replace('_is', '_spec')
+            sp = self.pathbuilder.add_path(prop_label, name)
+            sp.make_data_path([prop], span_p, 1, dtype)
+            created_paths.append(sp)
+
+        # Give back the paths we made
+        return created_paths
 
     def make_authority_legs(self, parent, authclass):
         """Takes a parent group that is an assertion, e.g. star:E13_crm_P108 or 
@@ -223,7 +258,10 @@ class STARPathMaker:
         # Get the assertion group itself
         assertion, chainbottom = self.make_assertion_path(parent, lineinfo)
         # Then the path(s) for the object
-        assignment = self.make_object_legs(assertion, lineinfo, chainbottom)
+        if lineinfo['type'] == 's':
+            assignment = self.make_span_legs(assertion, lineinfo, chainbottom)
+        else:
+            assignment = self.make_object_legs(assertion, lineinfo, chainbottom)
         # Prepend the assertion to the object
         assignment.insert(0, assertion)
         # If this is a grouping for further assertions, we are done after the object

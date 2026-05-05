@@ -149,6 +149,8 @@ class WisskiPath:
             fieldargs = ('uri', 'uri', 'uri_link')
         elif valuetype == 'xsd:coordinates':
             fieldargs = ('geofield', 'geofield_latlon', 'geofield_latlon')
+        elif valuetype == 'spec:JulianDay':
+            fieldargs = ('integer', 'number', 'number_unformatted')
         elif valuetype != 'xsd:string':
             warn(f'Unrecognised datatype {valuetype}; setting as string')
         self.fieldtype = fieldargs[0]
