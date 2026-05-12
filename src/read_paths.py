@@ -187,17 +187,16 @@ class STARPathMaker:
         created_paths = [span_p]
 
         # Datatype properties that go with E52 are:
-        span_props = {'crm:P82a_begin_of_the_begin': 'Start date', 
-                      'crm:P82b_end_of_the_end': 'End date', 
-                      'rdfs:label': 'Date specification'}
+        span_props = (('crm:P81a_end_of_the_begin', 'Earliest end', 'end_begin'),
+                      ('crm:P81b_begin_of_the_end', 'Latest beginning', 'start_end'),
+                      ('crm:P82a_begin_of_the_begin', 'Earliest beginning', 'start_begin'),
+                      ('crm:P82b_end_of_the_end', 'Latest end', 'end_end'),
+                      ('rdfs:label', 'Date specification', 'spec'))
         
         # For each of the datatype properties, make a datatype path off the E52 group
-        for prop, name in span_props.items():
-            dtype = 'spec:JulianDay'
-            prop_label = label.replace('g_','p_').replace('_is', '_' + name.split()[0].lower())
-            if 'P82' not in prop:
-                dtype = 'xsd:string'
-                prop_label = label.replace('g_','p_').replace('_is', '_spec')
+        for prop, name, tag in span_props:
+            dtype = 'spec:JulianDay' if 'P82' in prop else 'xsd:string'
+            prop_label = label.replace('g_','p_') + f"_{tag}"
             sp = self.pathbuilder.add_path(prop_label, name)
             sp.make_data_path([prop], span_p, 1, dtype)
             created_paths.append(sp)
